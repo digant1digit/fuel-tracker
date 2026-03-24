@@ -1,92 +1,83 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
+from io import BytesIO
+
+# Excel
+from openpyxl import Workbook
+from openpyxl.chart import LineChart, Reference
+
+# PDF
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet
 
 # ------------------ PAGE CONFIG ------------------
 st.set_page_config(page_title="Fuel Tracker", layout="wide")
 
-# ------------------ CUSTOM UI ------------------
+# ------------------ UI STYLE ------------------
 st.markdown("""
-    <style>
-    .main {background-color: #0f172a; color: white;}
-    .stMetric {background-color: #1e293b; padding: 15px; border-radius: 10px;}
-    .block-container {padding-top: 1rem;}
-    </style>
+<style>
+.main {background-color: #0f172a; color: white;}
+.stMetric {background-color: #1e293b; padding: 15px; border-radius: 10px;}
+</style>
 """, unsafe_allow_html=True)
 
 st.title("⛽ Fuel Tracker")
 
-# ------------------ TEMPLATE DOWNLOAD ------------------
-st.subheader("📥 Start Here")
-
+# ------------------ TEMPLATE ------------------
 sample_df = pd.DataFrame([
     {"Date": "2026-03-01", "KM": 1000, "Liters": 3, "Total Bill": 300}
 ])
 
-st.download_button(
-    "⬇️ Download Template",
-    sample_df.to_csv(index=False).encode("utf-8"),
-    "fuel_template.csv",
-    "text/csv"
-)
+st.download_button("⬇️ Download Template",
+                   sample_df.to_csv(index=False).encode("utf-8"),
+                   "fuel_template.csv")
 
-st.info("📌 Supports both formats: 2026-03-01 OR 01-03-2026")
+st.info("📌 Supports: 2026-03-01 OR 01-03-2026")
 
-# ------------------ FILE UPLOAD ------------------
+# ------------------ UPLOAD ------------------
 uploaded_file = st.file_uploader("📂 Upload CSV", type=["csv"])
 
 if uploaded_file:
-    # AUTO detect separator (comma, tab, etc.)
     df = pd.read_csv(uploaded_file, sep=None, engine="python")
 else:
     df = pd.DataFrame(columns=["Date", "KM", "Liters", "Total Bill"])
 
 # ------------------ VALIDATION ------------------
-required_cols = ["Date", "KM", "Liters", "Total Bill"]
-
-if len(df) > 0 and not all(col in df.columns for col in required_cols):
-    st.error("❌ Invalid CSV format. Use template.")
+required = ["Date", "KM", "Liters", "Total Bill"]
+if len(df) > 0 and not all(col in df.columns for col in required):
+    st.error("❌ Invalid CSV format")
     st.stop()
 
-# ------------------ AUTO CLEAN ------------------
+# ------------------ CLEAN ------------------
 if len(df) > 0:
-    # Smart date parsing (handles Indian + standard format)
     df["Date"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
-
-    # Convert numeric safely
     for col in ["KM", "Liters", "Total Bill"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Find bad rows
-    bad_rows = df[df.isnull().any(axis=1)]
+    bad = df[df.isnull().any(axis=1)]
+    if len(bad) > 0:
+        st.warning("⚠️ Invalid rows removed")
+        st.dataframe(bad, width="stretch")
 
-    if len(bad_rows) > 0:
-        st.warning("⚠️ Some rows have invalid data and will be ignored")
-        st.dataframe(bad_rows, width="stretch")
-
-    # Remove bad rows
     df = df.dropna()
 
-# ------------------ ADD ENTRY ------------------
-st.subheader("➕ Add Entry")
-
+# ------------------ ADD ------------------
 with st.form("add"):
     c1, c2, c3, c4 = st.columns(4)
-
     date = c1.date_input("Date", datetime.today())
     km = c2.number_input("KM", min_value=0.0)
     liters = c3.number_input("Liters", min_value=0.0)
     amount = c4.number_input("₹", min_value=0.0)
 
     if st.form_submit_button("Add"):
-        new = pd.DataFrame([{
+        df = pd.concat([df, pd.DataFrame([{
             "Date": str(date),
             "KM": km,
             "Liters": liters,
             "Total Bill": amount
-        }])
-        df = pd.concat([df, new], ignore_index=True)
-        st.success("Added!")
+        }])], ignore_index=True)
 
 # ------------------ CALCULATIONS ------------------
 if len(df) > 0:
@@ -95,72 +86,97 @@ if len(df) > 0:
     df["Distance"] = df["KM"].diff()
     df["Avg"] = df["Distance"] / df["Liters"]
     df["₹/KM"] = df["Total Bill"] / df["Distance"]
-
     df["Entry"] = range(1, len(df) + 1)
 
-    # Summary
-    total_distance = df["Distance"].sum()
-    total_liters = df["Liters"].sum()
-    overall = total_distance / total_liters if total_liters else 0
+    total_d = df["Distance"].sum()
+    total_l = df["Liters"].sum()
+    overall = total_d / total_l if total_l else 0
 
-    last_avg = df.iloc[-1]["Avg"]
+    c1, c2 = st.columns(2)
+    c1.metric("Last Avg", f"{df.iloc[-1]['Avg']:.2f} km/l")
+    c2.metric("Overall Avg", f"{overall:.2f} km/l")
 
-    col1, col2 = st.columns(2)
-    col1.metric("🚗 Last Avg", f"{last_avg:.2f} km/l")
-    col2.metric("📊 Overall Avg", f"{overall:.2f} km/l")
-
-    # ------------------ FILTER ------------------
-    st.subheader("📅 Filter")
-
-    col1, col2 = st.columns(2)
-    start = col1.date_input("From", df["Date"].min())
-    end = col2.date_input("To", df["Date"].max())
+    # FILTER
+    s, e = st.columns(2)
+    start = s.date_input("From", df["Date"].min())
+    end = e.date_input("To", df["Date"].max())
 
     df_f = df[(df["Date"] >= pd.to_datetime(start)) &
               (df["Date"] <= pd.to_datetime(end))]
 
-    # ------------------ TABLE ------------------
-    st.subheader("📋 Entries")
-
+    # TABLE
     show = df_f[["Entry", "Date", "KM", "Liters", "Total Bill", "Avg", "₹/KM"]]
     st.dataframe(show, width="stretch")
 
-    # ------------------ EDIT DELETE ------------------
-    st.subheader("⚙️ Manage")
-
-    idx = st.selectbox("Select Entry", df.index)
+    # EDIT
+    idx = st.selectbox("Edit Entry", df.index)
     row = df.loc[idx]
 
-    new_date = st.date_input("Edit Date", row["Date"])
-    new_km = st.number_input("Edit KM", value=float(row["KM"]))
-    new_liters = st.number_input("Edit Liters", value=float(row["Liters"]))
-    new_amt = st.number_input("Edit ₹", value=float(row["Total Bill"]))
+    nd = st.date_input("Date", row["Date"])
+    nk = st.number_input("KM", value=float(row["KM"]))
+    nl = st.number_input("Liters", value=float(row["Liters"]))
+    na = st.number_input("₹", value=float(row["Total Bill"]))
 
-    col1, col2 = st.columns(2)
+    if st.button("Update"):
+        df.loc[idx] = [nd, nk, nl, na, None, None, None, idx+1]
 
-    if col1.button("Update"):
-        df.loc[idx, ["Date", "KM", "Liters", "Total Bill"]] = [
-            str(new_date), new_km, new_liters, new_amt
-        ]
-        st.success("Updated")
-
-    if col2.button("Delete"):
+    if st.button("Delete"):
         df = df.drop(idx).reset_index(drop=True)
-        st.warning("Deleted")
 
-    # ------------------ GRAPH ------------------
-    st.subheader("📈 Monthly Trend")
-
+    # GRAPH
     df["Month"] = df["Date"].dt.to_period("M").astype(str)
-    monthly = df.groupby("Month")["Avg"].mean()
+    st.line_chart(df.groupby("Month")["Avg"].mean())
 
-    st.line_chart(monthly)
+    # ------------------ CSV EXPORT ------------------
+    export = df.copy()
+    export["Avg"] = export["Avg"].fillna(0).round(2)
+    export["₹/KM"] = export["₹/KM"].fillna(0).round(2)
 
-    # ------------------ DOWNLOAD ------------------
-    st.subheader("💾 Save")
+    st.download_button(
+        "📥 CSV",
+        export[["Date","KM","Liters","Total Bill","Avg","₹/KM"]].to_csv(index=False),
+        "fuel.csv"
+    )
 
-    st.warning("⚠️ Download file after changes!")
+    # ------------------ EXCEL EXPORT ------------------
+    wb = Workbook()
+    ws = wb.active
 
-    csv = df[["Date", "KM", "Liters", "Total Bill"]].to_csv(index=False)
+    headers = ["Date","KM","Liters","Total Bill","Avg","₹/KM"]
+    ws.append(headers)
 
-    st.download_button("Download CSV", csv, "fuel_data.csv")
+    for _, r in export.iterrows():
+        ws.append([str(r["Date"]), r["KM"], r["Liters"], r["Total Bill"], r["Avg"], r["₹/KM"]])
+
+    chart = LineChart()
+    data = Reference(ws, min_col=5, min_row=1, max_row=ws.max_row)
+    chart.add_data(data, titles_from_data=True)
+    ws.add_chart(chart, "H2")
+
+    buf = BytesIO()
+    wb.save(buf)
+
+    st.download_button("📊 Excel", buf.getvalue(), "report.xlsx")
+
+    # ------------------ PDF EXPORT ------------------
+    pdf_buf = BytesIO()
+    doc = SimpleDocTemplate(pdf_buf)
+    styles = getSampleStyleSheet()
+
+    elements = [Paragraph("Fuel Report", styles["Title"])]
+
+    table_data = [["Date","KM","Liters","Bill","Avg","₹/KM"]]
+    for _, r in export.iterrows():
+        table_data.append([str(r["Date"]), r["KM"], r["Liters"], r["Total Bill"], r["Avg"], r["₹/KM"]])
+
+    table = Table(table_data)
+    table.setStyle(TableStyle([
+        ("BACKGROUND",(0,0),(-1,0),colors.grey),
+        ("TEXTCOLOR",(0,0),(-1,0),colors.white),
+        ("GRID",(0,0),(-1,-1),1,colors.black)
+    ]))
+
+    elements.append(table)
+    doc.build(elements)
+
+    st.download_button("📄 PDF", pdf_buf.getvalue(), "report.pdf")
