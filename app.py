@@ -15,15 +15,11 @@ from reportlab.lib.styles import getSampleStyleSheet
 # ------------------ PAGE CONFIG ------------------
 st.set_page_config(page_title="Fuel Tracker", layout="wide")
 
-# ------------------ UI STYLE ------------------
-st.markdown("""
-<style>
-.main {background-color: #0f172a; color: white;}
-.stMetric {background-color: #1e293b; padding: 15px; border-radius: 10px;}
-</style>
-""", unsafe_allow_html=True)
-
 st.title("⛽ Fuel Tracker")
+
+# ------------------ SESSION INIT ------------------
+if "df" not in st.session_state:
+    st.session_state.df = pd.DataFrame(columns=["Date", "KM", "Liters", "Total Bill"])
 
 # ------------------ TEMPLATE ------------------
 sample_df = pd.DataFrame([
@@ -34,15 +30,18 @@ st.download_button("⬇️ Download Template",
                    sample_df.to_csv(index=False).encode("utf-8"),
                    "fuel_template.csv")
 
-st.info("📌 Supports: 2026-03-01 OR 01-03-2026")
+st.info("📌 Supports: 01-03-2026 OR 2026-03-01")
+st.warning("⚠️ Data is temporary. Download CSV to save your work.")
 
-# ------------------ UPLOAD ------------------
+# ------------------ FILE UPLOAD ------------------
 uploaded_file = st.file_uploader("📂 Upload CSV", type=["csv"])
 
 if uploaded_file:
-    df = pd.read_csv(uploaded_file, sep=None, engine="python")
-else:
-    df = pd.DataFrame(columns=["Date", "KM", "Liters", "Total Bill"])
+    df_uploaded = pd.read_csv(uploaded_file, sep=None, engine="python")
+    st.session_state.df = df_uploaded
+    st.success("CSV Loaded!")
+
+df = st.session_state.df
 
 # ------------------ VALIDATION ------------------
 required = ["Date", "KM", "Liters", "Total Bill"]
@@ -53,6 +52,7 @@ if len(df) > 0 and not all(col in df.columns for col in required):
 # ------------------ CLEAN ------------------
 if len(df) > 0:
     df["Date"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
+
     for col in ["KM", "Liters", "Total Bill"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -62,24 +62,34 @@ if len(df) > 0:
         st.dataframe(bad, width="stretch")
 
     df = df.dropna()
+    st.session_state.df = df
 
-# ------------------ ADD ------------------
+# ------------------ ADD ENTRY ------------------
+st.subheader("➕ Add Entry")
+
 with st.form("add"):
     c1, c2, c3, c4 = st.columns(4)
+
     date = c1.date_input("Date", datetime.today())
     km = c2.number_input("KM", min_value=0.0)
     liters = c3.number_input("Liters", min_value=0.0)
     amount = c4.number_input("₹", min_value=0.0)
 
     if st.form_submit_button("Add"):
-        df = pd.concat([df, pd.DataFrame([{
+        new_row = pd.DataFrame([{
             "Date": str(date),
             "KM": km,
             "Liters": liters,
             "Total Bill": amount
-        }])], ignore_index=True)
+        }])
+
+        st.session_state.df = pd.concat([st.session_state.df, new_row], ignore_index=True)
+        st.success("Added!")
+        st.rerun()
 
 # ------------------ CALCULATIONS ------------------
+df = st.session_state.df
+
 if len(df) > 0:
     df = df.sort_values("Date")
 
@@ -92,50 +102,71 @@ if len(df) > 0:
     total_l = df["Liters"].sum()
     overall = total_d / total_l if total_l else 0
 
-    c1, c2 = st.columns(2)
-    c1.metric("Last Avg", f"{df.iloc[-1]['Avg']:.2f} km/l")
-    c2.metric("Overall Avg", f"{overall:.2f} km/l")
+    col1, col2 = st.columns(2)
+    col1.metric("🚗 Last Avg", f"{df.iloc[-1]['Avg']:.2f} km/l")
+    col2.metric("📊 Overall Avg", f"{overall:.2f} km/l")
 
-    # FILTER
-    s, e = st.columns(2)
-    start = s.date_input("From", df["Date"].min())
-    end = e.date_input("To", df["Date"].max())
+    # ------------------ FILTER ------------------
+    st.subheader("📅 Filter")
+
+    c1, c2 = st.columns(2)
+    start = c1.date_input("From", df["Date"].min())
+    end = c2.date_input("To", df["Date"].max())
 
     df_f = df[(df["Date"] >= pd.to_datetime(start)) &
               (df["Date"] <= pd.to_datetime(end))]
 
-    # TABLE
+    # ------------------ TABLE ------------------
+    st.subheader("📋 Entries")
+
     show = df_f[["Entry", "Date", "KM", "Liters", "Total Bill", "Avg", "₹/KM"]]
     st.dataframe(show, width="stretch")
 
-    # EDIT
-    idx = st.selectbox("Edit Entry", df.index)
+    # ------------------ EDIT / DELETE ------------------
+    st.subheader("⚙️ Manage Entries")
+
+    idx = st.selectbox("Select Entry", df.index)
     row = df.loc[idx]
 
-    nd = st.date_input("Date", row["Date"])
-    nk = st.number_input("KM", value=float(row["KM"]))
-    nl = st.number_input("Liters", value=float(row["Liters"]))
-    na = st.number_input("₹", value=float(row["Total Bill"]))
+    new_date = st.date_input("Edit Date", row["Date"])
+    new_km = st.number_input("Edit KM", value=float(row["KM"]))
+    new_liters = st.number_input("Edit Liters", value=float(row["Liters"]))
+    new_amt = st.number_input("Edit ₹", value=float(row["Total Bill"]))
 
-    if st.button("Update"):
-        df.loc[idx] = [nd, nk, nl, na, None, None, None, idx+1]
+    col1, col2 = st.columns(2)
 
-    if st.button("Delete"):
-        df = df.drop(idx).reset_index(drop=True)
+    if col1.button("Update"):
+        st.session_state.df.loc[idx, ["Date", "KM", "Liters", "Total Bill"]] = [
+            str(new_date), new_km, new_liters, new_amt
+        ]
+        st.success("Updated")
+        st.rerun()
 
-    # GRAPH
+    if col2.button("Delete"):
+        st.session_state.df = st.session_state.df.drop(idx).reset_index(drop=True)
+        st.warning("Deleted")
+        st.rerun()
+
+    # ------------------ GRAPH ------------------
+    st.subheader("📈 Monthly Trend")
+
     df["Month"] = df["Date"].dt.to_period("M").astype(str)
-    st.line_chart(df.groupby("Month")["Avg"].mean())
+    monthly = df.groupby("Month")["Avg"].mean()
 
-    # ------------------ CSV EXPORT ------------------
+    st.line_chart(monthly)
+
+    # ------------------ EXPORT PREP ------------------
     export = df.copy()
     export["Avg"] = export["Avg"].fillna(0).round(2)
     export["₹/KM"] = export["₹/KM"].fillna(0).round(2)
 
+    # ------------------ CSV EXPORT ------------------
+    st.subheader("💾 Export")
+
     st.download_button(
-        "📥 CSV",
+        "📥 Download CSV",
         export[["Date","KM","Liters","Total Bill","Avg","₹/KM"]].to_csv(index=False),
-        "fuel.csv"
+        "fuel_data.csv"
     )
 
     # ------------------ EXCEL EXPORT ------------------
@@ -156,7 +187,7 @@ if len(df) > 0:
     buf = BytesIO()
     wb.save(buf)
 
-    st.download_button("📊 Excel", buf.getvalue(), "report.xlsx")
+    st.download_button("📊 Download Excel", buf.getvalue(), "fuel_report.xlsx")
 
     # ------------------ PDF EXPORT ------------------
     pdf_buf = BytesIO()
@@ -179,4 +210,4 @@ if len(df) > 0:
     elements.append(table)
     doc.build(elements)
 
-    st.download_button("📄 PDF", pdf_buf.getvalue(), "report.pdf")
+    st.download_button("📄 Download PDF", pdf_buf.getvalue(), "fuel_report.pdf")
